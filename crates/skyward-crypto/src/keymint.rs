@@ -6,9 +6,9 @@ use skyward_binder::{service, status};
 
 /// The phone's own key service, the only thing that can use a key the
 /// hardware wrapped.
-pub const SERVICE: &str = "android.hardware.security.keymint.IKeyMintDevice/default";
+pub const SERVICE: &str = "android.hardware.keymaster@4.0-service/default";
 
-const DEVICE: &str = "android.hardware.security.keymint.IKeyMintDevice";
+const DEVICE: &str = "android.hardware.keymaster@4.0";
 const OPERATION: &str = "android.hardware.security.keymint.IKeyMintOperation";
 
 const GET_HARDWARE_INFO: u32 = 1;

@@ -1,0 +1,56 @@
+[device]
+codename = "chopin"
+brand = "Redmi"
+model = "REDMI Note 10 Pro"
+ab = true
+soc = { hans = "天玑®1100 Pro", hant = "天璣®1100 Pro", en = "Dimensity® 1100 Pro" }
+os_version_prop = "ro.mi.os.version.incremental"
+rec_os_prop = "Kirk Lin"
+romer_os = "CoolApk Hua"
+
+[display]
+width = 1080
+height = 2400
+density = 440
+diagonal = 6.67
+
+# Kernel modules live on vendor (mali_kbase.ko and friends). The stock
+# boot ramdisk already loads what the recovery needs, so nothing to load.
+[modules]
+sources = ["vendor"]
+load = []
+
+# The touchscreen is Novatek's NVT-ts, built into the kernel; the stock
+# recovery's own touch works with no writes to the driver.
+[touch]
+
+# WLAN:
+[wlan]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant@1.4/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+# The persist partition, which the phone mounts at /mnt/vendor/persist.
+[partitions]
+mounted = ["persist", "vendor"]
+
+# The stock build the recovery is made on: the Chinese system's MIUI
+# 14.0.8.0, whose full update package on Xiaomi's own download server
+# holds the recovery partition the recovery is built on top of.
+[stock]
+version = "V14.0.8.0.TKPCNXM"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/V14.0.8.0.TKPCNXM/miui_CHOPIN_V14.0.8.0.TKPCNXM_c0252cdcc5_13.0.zip"
+recovery = "0000000000000000000000000000000000000000000000000000000000000000"
+
+probe = "http://connect.rom.miui.com/generate_204"
+
+# The update server the stock updater of the Chinese system asks.
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+#haptics
+[haptics]
+resonance = "/sys/devices/platform/11cb1000.i2c9/i2c-9/9-005a/f0_value"
+strength = { lightest = 0.5, strongest = 1.0 }

@@ -2520,6 +2520,7 @@ dependencies = [
  "abootimg-oxide",
  "anyhow",
  "cpio",
+ "flate2",
  "libc",
  "lz4_flex 0.14.0",
  "tempfile",
@@ -2668,6 +2669,7 @@ dependencies = [
 name = "skyward-pack"
 version = "0.3.1"
 dependencies = [
+ "abootimg-oxide",
  "anyhow",
  "clap",
  "hex",

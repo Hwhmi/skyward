@@ -6,6 +6,9 @@ English | [简体中文](README.zh-CN.md)
 
 Skyward is a recovery written in Rust, from scratch.
 
+Transplant to Note 10 Pro chopin
+Origin Code From:https://github.com/kirklin/skyward.git
+
 <p align="center">
   <img src="assets/home.png" width="30%" alt="Home">
   <img src="assets/settings-dark.png" width="30%" alt="Settings in dark mode">
@@ -22,10 +25,6 @@ Skyward is a recovery written in Rust, from scratch.
 
 How a second system is packaged and started is in
 [How dual boot works](#how-dual-boot-works).
-
-### Decryption
-
-![Decrypt data with the screen lock](slides/en/out/03-decrypt.png)
 
 ### Installing
 

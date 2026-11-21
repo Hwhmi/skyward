@@ -6,6 +6,9 @@
 
 Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 
+适配Redmi Note 10 Pro chopin
+源代码来自:https://github.com/kirklin/skyward.git
+
 <p align="center">
   <img src="assets/home.png" width="30%" alt="首页">
   <img src="assets/settings-dark.png" width="30%" alt="深色模式下的设置">
@@ -21,10 +24,6 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 ![切换系统只改写两个分区](slides/zh-CN/out/02-dual-boot-partitions.png)
 
 第二系统的安装包格式和启动过程见下文的[双系统的工作方式](#双系统的工作方式)。
-
-### 解密
-
-![用锁屏图案或密码解密 data 分区](slides/zh-CN/out/03-decrypt.png)
 
 ### 安装
 

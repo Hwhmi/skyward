@@ -54,8 +54,19 @@ impl Ramdisk {
     pub fn decode(compressed: &[u8]) -> Result<Self> {
         let mut cpio = Vec::new();
         lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        Self::from_cpio(&cpio)
+    }
+
+    /// Unpack a gzip-compressed newc archive, as MediaTek boot images carry.
+    pub fn decode_gzip(compressed: &[u8]) -> Result<Self> {
+        let mut cpio = Vec::new();
+        flate2::read::GzDecoder::new(compressed).read_to_end(&mut cpio).context("gzip decode")?;
+        Self::from_cpio(&cpio)
+    }
+
+    fn from_cpio(cpio: &[u8]) -> Result<Self> {
         let mut entries = Vec::new();
-        let mut rest = Cursor::new(cpio.as_slice());
+        let mut rest = Cursor::new(cpio);
         loop {
             let mut r = NewcReader::new(rest).context("cpio entry")?;
             if r.entry().is_trailer() {
@@ -85,6 +96,14 @@ impl Ramdisk {
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
         lz4_tool(&self.archive()?)
+    }
+
+    /// Pack as a gzip-compressed newc archive, keeping the compression the
+    /// device's own kernel used for its ramdisk.
+    pub fn encode_gzip(&self) -> Result<Vec<u8>> {
+        let mut out = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        out.write_all(&self.archive()?).context("gzip archive")?;
+        out.finish().context("gzip finish")
     }
 
     /// Pack as a newc archive, uncompressed.

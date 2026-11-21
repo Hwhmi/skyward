@@ -321,6 +321,15 @@ pub mod kms {
         .ok_or_else(|| anyhow!("{} offers no {choice}", info.name().to_string_lossy()))
     }
 
+/// The layout to assume when the driver tells nothing about its mixer
+/// pipeline: one full-width plane, with the panel's DSC compression on
+/// when the driver exposes a switch for it. MediaTek's DSC panels show
+/// a scrambled picture without it; Qualcomm's SDE carries no such
+/// property, as its mode_properties answer for the panel instead.
+fn mtk_layout(conn_props: &Props) -> SdeMode {
+    SdeMode { mixers: 1, dsc: conn_props.get("dsc_mode").is_ok() }
+}
+
     /// Built-in panel interfaces. Writeback and external outputs are never
     /// the recovery's screen.
     fn is_panel(interface: connector::Interface) -> bool {
@@ -479,7 +488,10 @@ pub mod kms {
 
     pub struct KmsSurface {
         card: Card,
-        bufs: [Buf; 3],
+        /// Two buffers at the least: one to show, one to draw the next frame
+        /// into. MediaTek's continuous-memory pool cannot always hold three
+        /// full-screen ones, so a third is taken only when it fits.
+        bufs: Vec<Buf>,
         /// The buffer the next frame goes into.
         back: usize,
         /// A frame was committed whose flip has not come yet.
@@ -528,6 +540,7 @@ pub mod kms {
                 }
             }
             let conn = panel.ok_or_else(|| anyhow!("no connected built-in panel"))?;
+            let conn_props = Props::read(&card, conn.handle())?;
             let preferred = conn
                 .modes()
                 .iter()
@@ -535,14 +548,27 @@ pub mod kms {
                 .ok_or_else(|| anyhow!("the panel reports no preferred mode"))?;
             // The fastest refresh at the preferred size, the first listed among
             // equals: Android scrolls at it, and the 13 Ultra's touch reports
-            // come at the same 120 Hz.
-            let mode = *conn
-                .modes()
-                .iter()
-                .filter(|m| m.size() == preferred.size())
-                .rev()
-                .max_by_key(|m| m.vrefresh())
-                .expect("the preferred mode itself has the preferred size");
+            // come at the same 120 Hz. A driver that tells nothing about its
+            // pipeline (MediaTek's among them) takes a plain 60 Hz instead:
+            // its DSC panels are timed for compressed data, and a full-
+            // resolution uncompressed frame does not fit the 120 Hz link,
+            // which shows as a picture squeezed into the top of the panel.
+            let mode = if conn_props.get("mode_properties").is_err() {
+                *conn
+                    .modes()
+                    .iter()
+                    .filter(|m| m.size() == preferred.size())
+                    .min_by_key(|m| m.vrefresh().abs_diff(60))
+                    .expect("the preferred mode itself has the preferred size")
+            } else {
+                *conn
+                    .modes()
+                    .iter()
+                    .filter(|m| m.size() == preferred.size())
+                    .rev()
+                    .max_by_key(|m| m.vrefresh())
+                    .expect("the preferred mode itself has the preferred size")
+            };
             let (w, h) = (mode.size().0 as u32, mode.size().1 as u32);
 
             // The CRTC already driving the panel, or the first one an
@@ -574,13 +600,18 @@ pub mod kms {
             // starts posted to the hardware. With one plane across both
             // mixers, no DSC selection and the default trigger, the 13
             // Ultra's panel tore while scrolling.
-            let conn_props = Props::read(&card, conn.handle())?;
             let layout = match conn_props.get("mode_properties") {
                 Ok((_, blob)) => {
                     let text = card.get_property_blob(blob).context("read mode_properties")?;
-                    SdeMode::find(&String::from_utf8_lossy(&text), &mode.name().to_string_lossy())?
+                    // Only Qualcomm's SDE describes its layer-mixer pipeline
+                    // in mode_properties. Other drivers (MediaTek's mtk_drm
+                    // among them) either have no such property or put
+                    // unrelated text in it: fall back to one full-width
+                    // plane instead of failing to start the UI.
+                    SdeMode::find(&String::from_utf8_lossy(&text), &mode.name().to_string_lossy())
+                        .unwrap_or_else(|_| mtk_layout(&conn_props))
                 }
-                Err(_) => SdeMode { mixers: 1, dsc: false },
+                Err(_) => mtk_layout(&conn_props),
             };
             let strips = layout.mixers as usize;
             if w % layout.mixers != 0 {
@@ -632,7 +663,18 @@ pub mod kms {
                 }
                 Ok(Buf { db, fb, map: map.cast(), len })
             };
-            let bufs = [make()?, make()?, make()?];
+            // Three buffers give tear-free page flipping with a frame to
+            // spare, but the third full-screen contiguous allocation does
+            // not always fit the continuous-memory pool, MediaTek's among
+            // it; take what the pool has room for, never fewer than two.
+            let mut bufs = vec![make()?, make()?];
+            for _ in 0..1 {
+                match make() {
+                    Ok(buf) => bufs.push(buf),
+                    // The half-made buffer's own handles go with its drop.
+                    Err(_) => break,
+                }
+            }
 
             let crtc_id = u64::from(u32::from(crtc));
             let mut req = atomic::AtomicModeReq::new();
@@ -647,10 +689,15 @@ pub mod kms {
             let first = card.create_property_blob(preferred).context("create mode blob")?;
             req.add_property(conn.handle(), conn_props.handle("CRTC_ID")?, property::Value::CRTC(Some(crtc)));
             // The mode is DSC-compressed: select its DSC variant, as Android's
-            // compositor does.
+            // compositor does. A driver without the switch, or with other
+            // names for its values, keeps whatever it has: failing here
+            // would leave the panel dark for no reason.
             if layout.dsc {
-                let (id, _) = conn_props.get("dsc_mode")?;
-                req.add_property(conn.handle(), id, property::Value::UnsignedRange(enum_value(&card, id, "dsc_enabled")?));
+                if let Ok((id, _)) = conn_props.get("dsc_mode") {
+                    if let Ok(value) = enum_value(&card, id, "dsc_enabled") {
+                        req.add_property(conn.handle(), id, property::Value::UnsignedRange(value));
+                    }
+                }
             }
             // Frame starts are posted to the hardware: the driver's own
             // default on display hardware of this generation, and Android's

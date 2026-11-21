@@ -17,6 +17,7 @@ hex = { workspace = true }
 # whatever gives it the partition's bytes.
 rust-fs-core = "0.4.4"
 rust-fs-erofs = "0.6.0"
+abootimg-oxide = "0.5.2"
 sha2 = "0.10.9"
 skyward-bootimg = { path = "../skyward-bootimg" }
 skyward-config = { path = "../skyward-config" }

@@ -91,11 +91,25 @@ struct Backlight {
 
 impl Backlight {
     fn open() -> Result<Self> {
-        let mut dirs: Vec<PathBuf> = fs::read_dir("/sys/class/backlight")
-            .context("read /sys/class/backlight")?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<std::io::Result<_>>()?;
-        dirs.sort();
+        // Qualcomm's panel light is a backlight under /sys/class/backlight,
+        // whose normal maximum the driver names in the device tree; Media-
+        // Tek's is an LED under /sys/class/leds, whose maximum is already
+        // the panel's own normal one.
+        let mut dirs: Vec<PathBuf> = match fs::read_dir("/sys/class/backlight") {
+            Ok(dirs) => dirs.map(|e| e.map(|e| e.path())).collect::<std::io::Result<_>>()?,
+            Err(_) => Vec::new(),
+        };
+        let led = dirs.is_empty();
+        if led {
+            dirs = fs::read_dir("/sys/class/leds")
+                .context("read /sys/class/leds")?
+                .map(|e| e.map(|e| e.path()))
+                .collect::<std::io::Result<Vec<PathBuf>>>()?
+                .into_iter()
+                .filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains("backlight")))
+                .collect();
+            dirs.sort();
+        }
         // Qualcomm panels expose panel0-backlight; take it when present.
         let dir = dirs
             .iter()
@@ -110,7 +124,7 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let top = if led { read("max_brightness")? } else { normal_max(read("max_brightness")?)? };
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
     }

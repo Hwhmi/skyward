@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 mod avb;
 mod described;
+mod image2;
 
 use skyward_bootimg::{BootImage, Ramdisk};
 
@@ -68,6 +69,10 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
+        /// The partition the image is flashed to: recovery on most phones,
+        /// boot on ones whose recovery lives in the boot ramdisk.
+        #[arg(long, default_value = "recovery")]
+        partition: String,
         #[arg(long)]
         out: PathBuf,
     },
@@ -118,17 +123,33 @@ fn main() -> Result<()> {
         Cmd::Repack { image, out } => {
             let mut img = BootImage::read(&image)?;
             img.ramdisk = Ramdisk::decode(&img.ramdisk)?.encode()?;
-            write(&out, &img, &img.to_bytes()?)
+            let kernel_len = img.kernel.len();
+            let ramdisk_len = img.ramdisk.len();
+            let bytes = img.to_bytes()?;
+            write(&out, kernel_len, ramdisk_len, &bytes)
         }
         Cmd::Boot { kernel, ramdisk, out } => {
             let mut img = BootImage::read(&ramdisk)?;
             img.kernel = BootImage::read(&kernel)?.kernel;
-            write(&out, &img, &img.to_bytes()?)
+            let kernel_len = img.kernel.len();
+            let ramdisk_len = img.ramdisk.len();
+            let bytes = img.to_bytes()?;
+            write(&out, kernel_len, ramdisk_len, &bytes)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, partition, out } => {
             let size = partition_size(&stock)?;
-            let mut img = BootImage::read(&stock)?;
-            let mut rd = Ramdisk::decode(&img.ramdisk)?;
+            let bytes = std::fs::read(&stock).with_context(|| format!("read {}", stock.display()))?;
+            // chopin and other MediaTek phones keep the recovery in the boot
+            // image and use a version 2 header; other devices have a v3/v4
+            // recovery partition. Both carry the same ramdisk files.
+            let mut v2 = image2::ImageV2::parse(&bytes)?;
+            let is_v2 = v2.is_some();
+            let mut img = if !is_v2 { Some(BootImage::read(&stock)?) } else { None };
+            let stock_ramdisk = match &v2 {
+                Some(i) => i.ramdisk().to_vec(),
+                None => img.as_ref().unwrap().ramdisk.clone(),
+            };
+            let mut rd = if is_v2 { Ramdisk::decode_gzip(&stock_ramdisk)? } else { Ramdisk::decode(&stock_ramdisk)? };
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
             if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {
@@ -168,9 +189,20 @@ fn main() -> Result<()> {
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
-            img.ramdisk = rd.encode()?;
-            let bytes = img.to_bytes()?;
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+            let ramdisk = if is_v2 { rd.encode_gzip()? } else { rd.encode()? };
+            let (image, kernel_len) = match &mut v2 {
+                Some(i) => {
+                    i.set_ramdisk(ramdisk.clone());
+                    (i.to_image_bytes()?, i.kernel.len())
+                }
+                None => {
+                    let i = img.as_mut().unwrap();
+                    i.ramdisk = ramdisk.clone();
+                    (i.to_bytes()?, i.kernel.len())
+                }
+            };
+            let footer = avb::footed(&image, &partition, size, &Sha256::digest(&image))?;
+            write(&out, kernel_len, ramdisk.len(), &footer)
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
@@ -268,13 +300,13 @@ fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
 }
 
 /// Write `bytes`, the image `img` makes, to `out`.
-fn write(out: &Path, img: &BootImage, bytes: &[u8]) -> Result<()> {
+fn write(out: &Path, kernel_len: usize, ramdisk_len: usize, bytes: &[u8]) -> Result<()> {
     std::fs::write(out, bytes).with_context(|| format!("write {}", out.display()))?;
     println!(
         "wrote {} ({} bytes kernel, {} bytes ramdisk, {} bytes in all)",
         out.display(),
-        img.kernel.len(),
-        img.ramdisk.len(),
+        kernel_len,
+        ramdisk_len,
         bytes.len()
     );
     Ok(())
