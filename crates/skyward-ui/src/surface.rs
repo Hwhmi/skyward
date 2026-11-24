@@ -824,7 +824,15 @@ fn mtk_layout(conn_props: &Props) -> SdeMode {
             if self.power != Power::On {
                 return Ok(());
             }
-            let Some((id, _, rest)) = self.lp else { return self.turn_off() };
+            let Some((id, _, rest)) = self.lp else {
+                // MediaTek's display driver has no low-power switch of its
+                // own. Stopping the CRTC is how the phone sleeps there, and
+                // some of its panels never come back from it: the frame
+                // memory is blacked out and the backlight is off by now, so
+                // leave the display running and only stop drawing.
+                self.power = Power::Resting;
+                return Ok(());
+            };
             self.settle()?;
             let mut req = atomic::AtomicModeReq::new();
             req.add_property(self.conn, id, property::Value::UnsignedRange(rest));
@@ -838,6 +846,13 @@ fn mtk_layout(conn_props: &Props) -> SdeMode {
         /// again.
         pub fn turn_off(&mut self) -> Result<()> {
             if self.power == Power::Off {
+                return Ok(());
+            }
+            if self.lp.is_none() {
+                // A display with no low-power switch of its own keeps
+                // running, as it does at rest: the backlight carries the
+                // dark, and the phone stays awake with the panel.
+                self.power = Power::Resting;
                 return Ok(());
             }
             self.settle()?;

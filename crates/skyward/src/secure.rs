@@ -107,8 +107,12 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
     let driver = Path::new(HARDWARE_DRIVER);
     if !driver.exists() {
-        std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
-            .with_context(|| format!("point {HARDWARE_DRIVER} at {HARDWARE_DRIVER_NODE}"))?;
+        // The installed system's init mounts the driver's filesystem and
+        // makes the nodes in it. A recovery's init does that only for a
+        // factory reset on some phones, such as this one's, so it is done
+        // here: with no node neither the directory nor the boot control
+        // can be started at all.
+        make_hardware_driver()?;
     }
     // The system's own init opens the driver to every program, as it does
     // /dev/binder; a recovery's, which uses none of it, leaves it root's
@@ -132,6 +136,114 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     // description, and a run of it before this was written may have left
     // that behind.
     skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
+    Ok(())
+}
+
+/// The node the phone's hardware services are reached through, made where a
+/// recovery does not make it. The driver is of one of two kinds: the older
+/// one registers its devices with the kernel, which makes a node of each in
+/// its own device filesystem, and the newer one is a filesystem of its own
+/// that a program mounts and then asks for the nodes it wants.
+fn make_hardware_driver() -> Result<()> {
+    // The older driver registers a device of each name with the kernel,
+    // and the node for it belongs in /dev, as the phone's own init makes
+    // it. A recovery's init makes none of them, so each is made here.
+    let mut made = false;
+    for name in ["binder", "hwbinder", "vndbinder"] {
+        let node = Path::new("/dev").join(name);
+        if node.exists() {
+            continue;
+        }
+        // There being a device in the kernel's list of misc devices and
+        // its node missing means the node was removed, not that the
+        // filesystem is missing.
+        let misc = format!("/sys/class/misc/{name}/dev");
+        let Ok(text) = fs::read_to_string(&misc) else { continue };
+        let (major, minor) = text
+            .trim()
+            .split_once(':')
+            .with_context(|| format!("{misc} does not read as major:minor"))?;
+        let number = |s: &str| u32::from_str_radix(s, 16).or_else(|_| s.parse());
+        make_char_node(&node, number(major)?, number(minor)?)?;
+        made = true;
+    }
+    let mode = || std::os::unix::fs::PermissionsExt::from_mode(0o666);
+    if made || Path::new(HARDWARE_DRIVER).exists() {
+        for name in ["binder", "hwbinder", "vndbinder"] {
+            let node = Path::new("/dev").join(name);
+            if node.exists() {
+                fs::set_permissions(&node, mode()).with_context(|| format!("open {}", node.display()))?;
+            }
+        }
+        return Ok(());
+    }
+    // The newer driver is a filesystem of its own that a program mounts
+    // and then asks for the nodes it wants; the nodes it makes stay in it,
+    // so /dev names them through links.
+    let dir = Path::new(HARDWARE_DRIVER_NODE).parent().expect("the node is in a directory");
+    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    if !skyward_block::mount::is_mount_point(dir)? {
+        skyward_block::mount::mount(Path::new("binder"), dir, "binder", &["stats=global".to_string()])
+            .context("mount the driver's own filesystem")?;
+    }
+    for name in ["hwbinder", "binder", "vndbinder"] {
+        let at = dir.join(name);
+        if !at.exists() {
+            add_binder_device(name)?;
+        }
+        fs::set_permissions(&at, mode()).with_context(|| format!("open {}", at.display()))?;
+        let link = Path::new("/dev").join(name);
+        if !link.exists() {
+            std::os::unix::fs::symlink(&at, &link).with_context(|| format!("point {} at {}", link.display(), at.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Ask a mounted binder filesystem for a device of this name, through the
+/// control file it carries.
+#[cfg(target_os = "android")]
+fn add_binder_device(name: &str) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // struct binderfs_device { char name[256]; __u32 major; __u32 minor; },
+    // and the ioctl that takes one: _IOW('b', 1, struct binderfs_device).
+    #[repr(C)]
+    struct Device {
+        name: [libc::c_char; 256],
+        major: u32,
+        minor: u32,
+    }
+    const ADD: libc::c_ulong = 0x4108_6201;
+    let control = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/binderfs/binder-control")
+        .context("open the driver's control file")?;
+    let mut device = Device { name: [0; 256], major: 0, minor: 0 };
+    for (slot, byte) in device.name.iter_mut().zip(name.bytes()) {
+        *slot = byte as libc::c_char;
+    }
+    if unsafe { libc::ioctl(control.as_raw_fd(), ADD as i32, &mut device) } < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("ask the driver for {name}"));
+    }
+    Ok(())
+}
+
+/// The same, where the crate is built for the host, which has no such
+/// filesystem: the node is never needed there.
+#[cfg(not(target_os = "android"))]
+fn add_binder_device(_name: &str) -> Result<()> {
+    anyhow::bail!("the driver's own filesystem is only on the phone")
+}
+
+/// Make a character device node, as the phone's own device filesystem does.
+fn make_char_node(at: &Path, major: u32, minor: u32) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(at.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", at.display()))?;
+    let dev = libc::makedev(major, minor);
+    if unsafe { libc::mknod(path.as_ptr(), libc::S_IFCHR | 0o666, dev) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("make {}", at.display()));
+    }
     Ok(())
 }
 

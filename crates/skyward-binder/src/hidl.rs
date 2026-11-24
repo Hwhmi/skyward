@@ -10,10 +10,10 @@ use crate::parcel::Payload;
 use anyhow::{bail, Context, Result};
 
 /// An address a call hands over, as the driver carries it.
-const ADDRESS: u32 = u32::from_be_bytes([b'p', b't', b'*', 0x85]);
+const ADDRESS: u32 = u32::from_le_bytes([b'p', b't', b'*', 0x85]);
 
 /// An object in the sending process, as the driver carries it.
-const OBJECT: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
+const OBJECT: u32 = u32::from_le_bytes([b's', b'h', b'*', 0x85]);
 
 /// The bytes this address points at sit inside what another address of the
 /// same call points at.
@@ -97,14 +97,56 @@ impl Message {
         // Whoever reads the frame does not free what it points at.
         frame.extend_from_slice(&[0; 4]);
         let frame_at = self.keep(frame);
-        let parent = self.address(frame_at, FRAME_BYTES, None);
-        self.address(at, length, Some(parent));
+        let parent = self.address(frame_at, FRAME_BYTES, None, 0);
+        self.address(at, length, Some(parent), 0);
+    }
+
+    /// A run of fixed-size records, each of which may hold a run of bytes
+    /// of its own: the phone's hardware services hand their parameters over
+    /// this way, and a parameter's own run points back into the record.
+    pub fn records(&mut self, count: usize, size: usize, build: impl FnOnce(&mut Records)) {
+        let mut data = vec![0u8; count * size];
+        let mut inner: Vec<(usize, Vec<u8>)> = Vec::new();
+        let base = data.as_ptr() as u64;
+        build(&mut Records { base, data: &mut data, inner: &mut inner });
+        let at = self.keep(data);
+        let outer = self.frame(at, count * size);
+        for (offset, bytes) in inner {
+            let ptr = bytes.as_ptr() as u64;
+            let length = bytes.len();
+            self.held.push(bytes.into_boxed_slice());
+            let frame = self.address(at + offset as u64, FRAME_BYTES, Some(outer), offset as u64);
+            self.address(ptr, length, Some(frame), 0);
+        }
+    }
+
+    /// A run whose length says where it is, written among the values.
+    fn frame(&mut self, at: u64, length: usize) -> usize {
+        let mut frame = Vec::with_capacity(FRAME_BYTES);
+        frame.extend_from_slice(&at.to_le_bytes());
+        frame.extend_from_slice(&(length as u64).to_le_bytes());
+        let frame_at = self.keep(frame);
+        let parent = self.address(frame_at, FRAME_BYTES, None, 0);
+        self.address(at, length, Some(parent), 0)
+    }
+
+    /// Room for something the call leaves out, written as the far side
+    /// reads an empty run.
+    pub fn vacant(&mut self, bytes: usize) {
+        self.data.resize(self.data.len() + bytes, 0);
+    }
+
+    /// The next value starts at a whole multiple of `n` bytes.
+    pub fn align(&mut self, n: usize) {
+        while !self.data.len().is_multiple_of(n) {
+            self.data.push(0);
+        }
     }
 
     /// Write an address among the values and say where it sits, which is
     /// how the driver finds it. The answer is which address this is, for
     /// the one pointing inside it to name.
-    fn address(&mut self, at: u64, length: usize, inside: Option<usize>) -> usize {
+    fn address(&mut self, at: u64, length: usize, inside: Option<usize>, offset: u64) -> usize {
         let which = self.addresses.len();
         self.addresses.push(self.data.len() as u64);
         self.data.extend_from_slice(&ADDRESS.to_le_bytes());
@@ -112,8 +154,7 @@ impl Message {
         self.data.extend_from_slice(&at.to_le_bytes());
         self.data.extend_from_slice(&(length as u64).to_le_bytes());
         self.data.extend_from_slice(&(inside.unwrap_or(0) as u64).to_le_bytes());
-        // The address inside the frame is the frame's first field.
-        self.data.extend_from_slice(&0u64.to_le_bytes());
+        self.data.extend_from_slice(&offset.to_le_bytes());
         self.pointed += (length as u64).next_multiple_of(WORD);
         which
     }
@@ -130,6 +171,39 @@ impl Payload for Message {
 
     fn pointed(&self) -> u64 {
         self.pointed
+    }
+}
+
+/// A run of records being filled in, whose bytes are written at offsets
+/// the caller works out.
+pub struct Records<'a> {
+    base: u64,
+    data: &'a mut [u8],
+    inner: &'a mut Vec<(usize, Vec<u8>)>,
+}
+
+impl Records<'_> {
+    pub fn u32(&mut self, at: usize, v: u32) {
+        self.data[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn u64(&mut self, at: usize, v: u64) {
+        self.data[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// A run of bytes held in the record at `at`: where it is and how long
+    /// it is, kept so the driver can copy it where it is read.
+    pub fn bytes(&mut self, at: usize, value: &[u8]) {
+        let owned = value.to_vec();
+        self.u64(at, owned.as_ptr() as u64);
+        self.u64(at + 8, owned.len() as u64);
+        self.inner.push((at, owned));
+    }
+
+    /// Where the record being filled in sits in the run, for the bytes it
+    /// holds to point back at it.
+    fn base(&self) -> u64 {
+        self.base
     }
 }
 
@@ -166,6 +240,43 @@ impl<'a> Answer<'a> {
         Ok(self.take(4)?[0] != 0)
     }
 
+    /// The next value starts at a whole multiple of `n` bytes.
+    pub fn align(&mut self, n: usize) {
+        while self.at % n != 0 && self.at < self.data.len() {
+            self.at += 1;
+        }
+    }
+
+    /// Text the far side handed over as a run of bytes with a terminator.
+    pub fn text_run(&mut self) -> Result<String> {
+        let (_, raw) = self.run()?;
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        Ok(String::from_utf8_lossy(&raw[..end]).into_owned())
+    }
+
+    pub fn i64(&mut self) -> Result<i64> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    }
+
+    /// A run the far side answered with: how many things it holds and the
+    /// bytes of them, which the driver has already moved here.
+    pub fn run(&mut self) -> Result<(usize, &'a [u8])> {
+        let frame = self.take(FRAME_BYTES)?;
+        let count = u64::from_le_bytes(frame[8..16].try_into().expect("eight bytes"));
+        self.take(ADDRESS_BYTES).context("read the run's own frame")?;
+        let raw = self.take(ADDRESS_BYTES)?;
+        let kind = u32::from_le_bytes(raw[0..4].try_into().expect("four bytes"));
+        if kind != ADDRESS {
+            bail!("the reply holds {kind:#x} where a run was expected");
+        }
+        let at = u64::from_le_bytes(raw[8..16].try_into().expect("eight bytes"));
+        let length = u64::from_le_bytes(raw[16..24].try_into().expect("eight bytes"));
+        if at == 0 {
+            return Ok((0, &[]));
+        }
+        Ok((count as usize, unsafe { std::slice::from_raw_parts(at as *const u8, length as usize) }))
+    }
+
     /// The bytes an address in the reply points at. The driver has already
     /// moved them into this program's own room and rewritten the address,
     /// so they are read where they lie.
@@ -184,7 +295,7 @@ impl<'a> Answer<'a> {
     }
 
     /// Text the far side wrote as its own value rather than as a frame.
-    fn text(&mut self) -> Result<String> {
+    pub fn text(&mut self) -> Result<String> {
         let units = self.i32()?;
         if units < 0 {
             bail!("text of length {units} was read where some was expected");

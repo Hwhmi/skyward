@@ -11,6 +11,7 @@ pub mod weaver;
 #[cfg(target_os = "android")]
 pub mod data;
 #[cfg(target_os = "android")]
+pub mod keymaster;
 pub mod keymint;
 #[cfg(target_os = "android")]
 pub mod keystore2;

@@ -26,11 +26,63 @@ load = []
 
 # WLAN:
 [wlan]
+modules = ["conninfra", "connfem", "wmt_chrdev_wifi", "wlan_drv_gen4m"]
 interface = "wlan0"
 supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/system/lib64", "/vendor/lib64"]
 service = "android.hardware.wifi.supplicant@1.4/default"
 probe = "http://connect.rom.miui.com/generate_204"
+
+# The phone's secure world, read from /vendor/etc/init: tee-supplicant
+# (tee-supplicant.rc), the key service over the TEE (keymaster 4.0, mitee
+# build), the directory the phone's hardware services register with, and
+# the credential service. The directory comes first, as nothing can
+# register before it runs. The stock recovery starts none of them.
+[[service]]
+path = "/vendor/bin/tee-supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+
+[[service]]
+path = "/system/bin/hwservicemanager"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system", "readproc"]
+ready_property = "hwservicemanager.ready"
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot@1.2-service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system"]
+ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.keymaster@4.0-service.mitee"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system", "drmrpc"]
+ready_hardware_service = "android.hardware.keymaster@4.0::IKeymasterDevice/default"
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system"]
+ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
+
+# What tee-supplicant.rc hands over as the phone boots: the TEE's own
+# devices go to the system, and the key service runs as that.
+[[owners]]
+user = "system"
+group = "keystore"
+mode = 0o660
+paths = ["/dev/tee0", "/dev/teepriv0"]
+
+[[owners]]
+user = "system"
+group = "system"
+mode = 0o660
+paths = ["/dev/rpmb0"]
 
 # The persist partition, which the phone mounts at /mnt/vendor/persist.
 [partitions]

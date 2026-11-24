@@ -31,7 +31,15 @@ pub fn load(dirs: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
             .iter()
             .find(|d| d.join(&file).is_file())
             .ok_or_else(|| anyhow!("{file} is in none of {dirs:?}"))?;
-        let graph = parse_dep(dir)?;
+        // Some vendor images ship the modules without a modules.dep; the
+        // configuration then already lists them in the order they need,
+        // so each is loaded as it stands rather than failing the lot.
+        let Ok(graph) = parse_dep(dir) else {
+            let path = dir.join(&file);
+            insmod(&path, "")?;
+            loaded.push(path);
+            continue;
+        };
         for m in graph.load_order(std::slice::from_ref(&file)) {
             let path = graph
                 .resolve_path(&m)
@@ -135,16 +143,39 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// `MODULE_INIT_IGNORE_VERMAGIC`, as the module loader's own header names
+/// the flag: the release string the module was built against is skipped.
+const IGNORE_VERMAGIC: libc::c_int = 2;
+
 /// Hand the open module `file` to the kernel with the settings `params`.
+///
+/// A kernel built apart from the phone's own — which is what a ported
+/// recovery usually runs — records a release string of its own, and the
+/// loader refuses every one of the phone's modules by that string alone,
+/// before it ever looks at what they contain. The modules are the ones that
+/// kernel is meant to run, so the second attempt asks it to skip the string;
+/// the first one is kept so an untouched build still loads plainly.
 #[cfg(target_os = "android")]
 fn finit_module(file: &fs::File, params: &str) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
     use std::os::unix::io::AsRawFd;
     let params = std::ffi::CString::new(params).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let rc = unsafe { libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), params.as_ptr(), 0 as libc::c_int) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
+    let load = |flags: libc::c_int| unsafe {
+        libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), params.as_ptr(), flags)
+    };
+    if load(0) == 0 {
+        return Ok(());
     }
-    Ok(())
+    let refused = std::io::Error::last_os_error();
+    // ENOEXEC is what a release string mismatch is reported as.
+    if refused.raw_os_error() == Some(libc::ENOEXEC) {
+        let mut again = file;
+        again.seek(SeekFrom::Start(0))?;
+        if load(IGNORE_VERMAGIC) == 0 {
+            return Ok(());
+        }
+    }
+    Err(refused)
 }
 
 #[cfg(not(target_os = "android"))]

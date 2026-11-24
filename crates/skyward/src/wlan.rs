@@ -625,11 +625,19 @@ impl Station {
 fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
     let net = Path::new("/sys/class/net").join(&cfg.interface);
     if !net.exists() {
-        for file in &cfg.firmware {
-            place(file)?;
-        }
-        for path in skyward_modules::load(modules, &cfg.modules)? {
-            skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+        provide(cfg)?;
+        // The screen is told why the switch did nothing, but only for as
+        // long as it shows it; a log taken afterwards needs the reason too.
+        match skyward_modules::load(modules, &cfg.modules) {
+            Ok(loaded) => {
+                for path in loaded {
+                    skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+                }
+            }
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("the WLAN's modules did not load: {e:#}"));
+                return Err(e);
+            }
         }
         for w in &cfg.writes {
             fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
@@ -641,6 +649,44 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
         }
     }
     iface::set_up(&cfg.interface, true)
+}
+
+/// Where the phone keeps the images its drivers ask the loader for.
+const VENDOR_FIRMWARE: &str = "/vendor/firmware";
+
+/// The folder the kernel itself reads firmware from, before it asks the
+/// recovery's own ueventd.
+const KERNEL_FIRMWARE: &str = "/lib/firmware";
+
+/// Put the firmware the driver asks for where the loader looks.
+///
+/// A recovery's own `/etc/firmware` is empty, and a driver asks for its
+/// images by names only the vendor build knows, so the phone's whole folder
+/// is shown at the places the loader reads instead of copying it file by
+/// file. The configuration's own list is the fallback for a phone whose
+/// images are not kept together.
+fn provide(cfg: &Config) -> Result<()> {
+    let vendor = Path::new(VENDOR_FIRMWARE);
+    if vendor.is_dir() {
+        // Two places, because a request is answered from whichever the
+        // kernel tries first: the folder it passes on to the recovery's own
+        // ueventd, and the one it reads itself.
+        for at in [FIRMWARE, KERNEL_FIRMWARE] {
+            let at = Path::new(at);
+            if fs::create_dir_all(at).is_err() || skyward_block::mount::is_mount_point(at).unwrap_or(false) {
+                continue;
+            }
+            if skyward_block::mount::bind(vendor, at).is_ok() {
+                skyward_sys::kmsg(&format!("the WLAN's firmware is shown at {}", at.display()))?;
+            }
+        }
+        return Ok(());
+    }
+    let _ = skyward_sys::kmsg(&format!("no folder at {VENDOR_FIRMWARE}, copying the list instead"));
+    for file in &cfg.firmware {
+        place(file)?;
+    }
+    Ok(())
 }
 
 /// Put a file the driver asks for where the firmware loader looks.

@@ -73,6 +73,20 @@ enum Cmd {
         /// boot on ones whose recovery lives in the boot ramdisk.
         #[arg(long, default_value = "recovery")]
         partition: String,
+        /// A kernel to use in place of the stock image's, as a raw Image.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        /// A device tree to use in place of the stock image's, as a raw
+        /// blob, keeping whatever follows it.
+        #[arg(long)]
+        dtb: Option<PathBuf>,
+        /// A ramdisk file to use in place of the stock one, as
+        /// `path/in/ramdisk=file`.
+        #[arg(long = "replace", value_name = "PATH=FILE")]
+        replace: Vec<String>,
+        /// A file the stock ramdisk has none of, as `path/in/ramdisk=file`.
+        #[arg(long = "add", value_name = "PATH=FILE")]
+        add: Vec<String>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -136,7 +150,7 @@ fn main() -> Result<()> {
             let bytes = img.to_bytes()?;
             write(&out, kernel_len, ramdisk_len, &bytes)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, partition, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, partition, kernel, dtb, replace, add, out } => {
             let size = partition_size(&stock)?;
             let bytes = std::fs::read(&stock).with_context(|| format!("read {}", stock.display()))?;
             // chopin and other MediaTek phones keep the recovery in the boot
@@ -150,6 +164,29 @@ fn main() -> Result<()> {
                 None => img.as_ref().unwrap().ramdisk.clone(),
             };
             let mut rd = if is_v2 { Ramdisk::decode_gzip(&stock_ramdisk)? } else { Ramdisk::decode(&stock_ramdisk)? };
+            // A phone whose owner built a kernel, device tree or partition
+            // table of their own is given those, so that the recovery keeps
+            // what the rest of the phone runs on.
+            if let Some(path) = &kernel {
+                let v2 = v2.as_mut().with_context(|| format!("{} holds no v2 header to put a kernel in", stock.display()))?;
+                v2.kernel = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            }
+            if let Some(path) = &dtb {
+                let v2 = v2.as_mut().with_context(|| format!("{} holds no v2 header to put a device tree in", stock.display()))?;
+                v2.set_dtb(std::fs::read(path).with_context(|| format!("read {}", path.display()))?)?;
+            }
+            for spec in &replace {
+                let (name, from) = spec
+                    .split_once('=')
+                    .with_context(|| format!("{spec} does not read as path/in/ramdisk=file"))?;
+                rd.replace(name, std::fs::read(from).with_context(|| format!("read {from}"))?)?;
+            }
+            for spec in &add {
+                let (name, from) = spec
+                    .split_once('=')
+                    .with_context(|| format!("{spec} does not read as path/in/ramdisk=file"))?;
+                rd.add(name, 0o644, std::fs::read(from).with_context(|| format!("read {from}"))?)?;
+            }
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
             if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {

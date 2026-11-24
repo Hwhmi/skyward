@@ -3,7 +3,34 @@ use anyhow::{bail, Context, Result};
 /// The mark libbinder writes into every call header. Both ends have to agree
 /// on it: it tells apart the copies of libbinder a phone carries, and the one
 /// the recovery's own programs are built from is the recovery copy.
-const HEADER: i32 = i32::from_be_bytes(*b"RECO");
+const HEADER_RECOVERY: i32 = i32::from_le_bytes(*b"RECO");
+
+/// The mark a system program writes, which is the only one a directory built
+/// before Android 13 reads: recoveries were not given a mark of their own
+/// until then, and their programs were built as system ones.
+const HEADER_SYSTEM: i32 = i32::from_le_bytes(*b"SYST");
+
+/// The first version of Android whose recoveries write a mark of their own.
+const RECOVERY_HEADER_SDK: u32 = 33;
+
+/// Which mark the phone's own programs read. A call to a recovery built as
+/// Android 12 or earlier carries the system mark, or the far side turns it
+/// away as a call from another copy of libbinder.
+fn header() -> i32 {
+    #[cfg(target_os = "android")]
+    {
+        let sdk = skyward_sys::prop("ro.build.version.sdk").and_then(|sdk| sdk.parse::<u32>().ok());
+        match sdk {
+            Some(sdk) if sdk >= RECOVERY_HEADER_SDK => HEADER_RECOVERY,
+            Some(_) => HEADER_SYSTEM,
+            None => HEADER_RECOVERY,
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        HEADER_RECOVERY
+    }
+}
 
 /// Strict mode gathers violations rather than acting on them; a caller with
 /// no policy of its own still sets that bit.
@@ -15,8 +42,8 @@ const UNSET_WORK_SOURCE: i32 = -1;
 /// An object in the sending process, as a transaction carries it to the
 /// process it is sent to, and one of the sending process's own, as it
 /// writes it.
-const BINDER_TYPE_HANDLE: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
-const BINDER_TYPE_BINDER: u32 = u32::from_be_bytes([b's', b'b', b'*', 0x85]);
+const BINDER_TYPE_HANDLE: u32 = u32::from_le_bytes([b's', b'h', b'*', 0x85]);
+const BINDER_TYPE_BINDER: u32 = u32::from_le_bytes([b's', b'b', b'*', 0x85]);
 
 /// What libbinder says of every object of its own it hands over: that
 /// calls on it may carry file descriptors, and that they run at the
@@ -76,7 +103,7 @@ impl Parcel {
         let mut p = Parcel::default();
         p.i32(STRICT_MODE_PENALTY_GATHER);
         p.i32(UNSET_WORK_SOURCE);
-        p.i32(HEADER);
+        p.i32(header());
         p.string(interface);
         p
     }
@@ -312,7 +339,7 @@ mod tests {
         let mut r = Reader::new(p.bytes());
         assert_eq!(r.i32().unwrap(), i32::MIN, "strict mode gathers");
         assert_eq!(r.i32().unwrap(), -1, "no work source");
-        assert_eq!(r.i32().unwrap(), 0x5245_434f, "the recovery's mark, RECO");
+        assert_eq!(r.i32().unwrap(), 0x4f43_4552, "the recovery's mark, RECO");
         assert_eq!(r.string().unwrap(), "a.b.IC");
         assert_eq!(r.here(), p.bytes().len(), "the header is all of it");
     }
@@ -327,7 +354,7 @@ mod tests {
         let mut vendor = Parcel::default();
         vendor.i32(i32::MIN);
         vendor.i32(-1);
-        vendor.i32(i32::from_be_bytes(*b"VNDR"));
+        vendor.i32(i32::from_le_bytes(*b"VNDR"));
         vendor.string("a.b.IC");
         assert_eq!(Reader::new(vendor.bytes()).call().unwrap(), "a.b.IC", "the vendor partition's copy");
         assert!(Reader::new(&[0; 8]).call().is_err(), "a call cut short");
@@ -344,7 +371,7 @@ mod tests {
         let mut r = Reader::new(p.bytes());
         r.i32().unwrap();
         let raw = &p.bytes()[4..32];
-        assert_eq!(&raw[0..4], b"\x85*bs", "one of the sender's own");
+        assert_eq!(&raw[0..4], b"sb*\x85", "one of the sender's own");
         assert_eq!(u32::from_le_bytes(raw[4..8].try_into().unwrap()), 0x113, "takes file descriptors, at the lowest ordinary priority");
         assert_eq!(u64::from_le_bytes(raw[8..16].try_into().unwrap()), 0x1234);
         assert_eq!(u64::from_le_bytes(raw[16..24].try_into().unwrap()), 0x1234);
@@ -419,7 +446,7 @@ mod tests {
     /// or address, its cookie, and how far its interface travels.
     fn object(kind: &[u8; 4], handle: u64) -> Parcel {
         let mut p = Parcel::default();
-        p.i32(i32::from_be_bytes(*kind));
+        p.i32(i32::from_le_bytes(*kind));
         p.i32(0);
         p.i64(handle as i64);
         p.i64(0);

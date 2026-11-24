@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 /// The calls libbinder answers for every object before any interface sees
 /// them: whether the object is there, which interface it serves, which
 /// process serves it, and what it carries besides its interface.
-const PING: u32 = u32::from_be_bytes(*b"_PNG");
-const INTERFACE: u32 = u32::from_be_bytes(*b"_NTF");
-const DEBUG_PID: u32 = u32::from_be_bytes(*b"_PID");
-const EXTENSION: u32 = u32::from_be_bytes(*b"_EXT");
+const PING: u32 = u32::from_le_bytes(*b"_PNG");
+const INTERFACE: u32 = u32::from_le_bytes(*b"_NTF");
+const DEBUG_PID: u32 = u32::from_le_bytes(*b"_PID");
+const EXTENSION: u32 = u32::from_le_bytes(*b"_EXT");
 
 /// The calls every service of the newer kind answers about its interface,
 /// numbered from the top of the range its own methods are numbered from

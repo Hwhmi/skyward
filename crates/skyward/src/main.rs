@@ -170,6 +170,10 @@ enum Cmd {
     /// directory, such as android.hardware.security.keymint.IKeyMintDevice/default.
     #[cfg(target_os = "android")]
     Service { name: String },
+    /// Ask the phone's key service, as phones up to Android 12 describe it,
+    /// about itself: the older service phone key hardware answers over.
+    #[cfg(target_os = "android")]
+    Keymaster,
     /// Report the phone's key service and, given a key directory Android
     /// wrote, unwrap the key it holds and say how long it is.
     #[cfg(target_os = "android")]
@@ -342,6 +346,14 @@ fn main() -> Result<()> {
                 None => "not registered",
             };
             println!("{name} is {described} and {running}");
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Keymaster => {
+            let hardware = skyward_binder::driver::Binder::hardware()?;
+            let service = skyward_crypto::keymaster::Keymaster::open(&hardware)?;
+            let hw = service.hardware()?;
+            println!("keymaster {} version {} at security level {} by {}", hw.name, hw.version, hw.security_level, hw.author);
             Ok(())
         }
         #[cfg(target_os = "android")]

@@ -37,6 +37,42 @@ impl ImageV2 {
         self.ramdisk = ramdisk;
     }
 
+    /// Put `dtb` in place of the device tree the image carries, keeping
+    /// whatever follows it in the tail.
+    ///
+    /// A MediaTek tail opens with a 64-byte wrapper that names the device
+    /// tree's length at 0x04 and 0x20, and the FDT follows it. The
+    /// bootloader reads the wrapper first, so an image whose tail starts
+    /// with the FDT is taken to carry no device tree at all, and the
+    /// kernel is started without one.
+    pub fn set_dtb(&mut self, dtb: Vec<u8>) -> Result<()> {
+        const WRAPPER: usize = 64;
+        const MAGIC: [u8; 4] = [0xd7, 0xb7, 0xab, 0x1e];
+        let wrapped = self.tail.len() >= WRAPPER && self.tail[..4] == MAGIC;
+        let (head, old) = if wrapped {
+            let old = u32::from_le_bytes(self.tail[0x20..0x24].try_into().unwrap()) as usize;
+            (self.tail[..WRAPPER].to_vec(), old)
+        } else {
+            let old = match self.header.versioned {
+                HeaderV0Versioned::V2 { dtb_size, .. } => dtb_size as usize,
+                _ => 0,
+            };
+            (Vec::new(), old)
+        };
+        let rest = self.tail.get(head.len() + old..).unwrap_or_default().to_vec();
+        let size = u32::try_from(dtb.len()).context("device tree size")?;
+        let mut tail = head;
+        tail.extend_from_slice(&dtb);
+        tail.extend_from_slice(&rest);
+        if wrapped {
+            let total = u32::try_from(dtb.len() + WRAPPER).context("wrapped device tree size")?;
+            tail[0x04..0x08].copy_from_slice(&total.to_le_bytes());
+            tail[0x20..0x24].copy_from_slice(&size.to_le_bytes());
+        }
+        self.tail = tail;
+        Ok(())
+    }
+
     /// The boot image without its partition padding or AVB footer, ready to
     /// be handed to `avb::footed`.
     pub fn to_image_bytes(&self) -> Result<Vec<u8>> {

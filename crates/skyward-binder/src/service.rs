@@ -56,11 +56,11 @@ const DUMP_PRIORITY_DEFAULT: i32 = 0b1000;
 
 /// Ask any object which process serves it. libbinder answers this itself,
 /// for every object, before any interface sees the call.
-const DEBUG_PID: u32 = u32::from_be_bytes(*b"_PID");
+const DEBUG_PID: u32 = u32::from_le_bytes(*b"_PID");
 
 /// Ask any object which interface it serves, which libbinder answers the
 /// same way.
-const INTERFACE: u32 = u32::from_be_bytes(*b"_NTF");
+const INTERFACE: u32 = u32::from_le_bytes(*b"_NTF");
 
 /// Ask a service which version of its interface it serves. Every service
 /// of the newer kind answers this, numbered from the top of the range its
