@@ -4,8 +4,17 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Where the phone's own partitions keep the table.
+/// Where the phone's own partitions keep the table, under the name
+/// Qualcomm's phones give it.
 pub const FILES: [&str; 2] = ["/vendor/etc/fstab.qcom", "/odm/etc/fstab.qcom"];
+
+/// The folders the table lies in on every phone, whatever its platform
+/// names it: MediaTek's write `fstab.mt6893`, and the platform's own name
+/// is the one the phone's other tables use too.
+const DIRS: [&str; 2] = ["/vendor/etc", "/odm/etc"];
+
+/// Files in those folders that begin with `fstab.` and are no table.
+const NOT_TABLES: [&str; 1] = ["fstab.enableswap"];
 
 /// One filesystem the phone knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,15 +61,51 @@ pub fn entries(text: &str) -> Vec<Entry> {
 }
 
 /// Every entry of the phone's own table, read from wherever the table is.
+///
+/// A phone names the table after its platform, which is not the same name
+/// on every phone: Qualcomm's is `fstab.qcom`, MediaTek's `fstab.mt6893`.
+/// The names given above are read first, and then whatever else lies in
+/// the folders the tables are kept in, so that a phone whose platform this
+/// build has never heard of is read all the same. `fstab.emmc`, the name a
+/// phone falls back to, is read last, and an entry another table already
+/// names is not added twice.
 fn table() -> Result<Vec<Entry>> {
+    let mut files: Vec<PathBuf> = FILES.iter().map(PathBuf::from).collect();
+    for dir in DIRS {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {dir}")),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.starts_with("fstab.") || NOT_TABLES.contains(&name) {
+                continue;
+            }
+            files.push(path);
+        }
+    }
+    files.sort_by_key(|p| {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        (name == "fstab.emmc", name)
+    });
+    files.dedup();
     let mut out = Vec::new();
-    for file in FILES {
+    for file in &files {
         let text = match std::fs::read_to_string(file) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e).with_context(|| format!("read {file}")),
+            Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
         };
-        out.extend(entries(&text));
+        for entry in entries(&text) {
+            let known = out
+                .iter()
+                .any(|e: &Entry| e.mount_point == entry.mount_point && e.device == entry.device);
+            if !known {
+                out.push(entry);
+            }
+        }
     }
     Ok(out)
 }

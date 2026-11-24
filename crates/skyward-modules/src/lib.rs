@@ -174,6 +174,14 @@ fn finit_module(file: &fs::File, params: &str) -> std::io::Result<()> {
         if load(IGNORE_VERMAGIC) == 0 {
             return Ok(());
         }
+        // The string was skipped and the kernel still refused it: say what
+        // it said then, which is the reason that is left, such as the
+        // symbols' versions not being the ones this kernel records.
+        let after = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(
+            after.kind(),
+            format!("{after} (the release string was skipped; plainly it was refused as {refused})"),
+        ));
     }
     Err(refused)
 }
